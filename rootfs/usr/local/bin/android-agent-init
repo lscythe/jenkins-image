@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Prepares the agent user's mounted caches, then runs the given command (by default the base image's entrypoint).
+# Volumes may be empty, left over from an older image, or populated by Docker from this image.
+set -euo pipefail
+
+readonly CONFIG_DIR=/etc/android-agent
+readonly INSTALLATIONS_KEY=org.gradle.java.installations.paths
+
+log() {
+	echo "android-agent-init: $*" >&2
+}
+
+java_installation_paths() {
+	local version paths=()
+	while read -r version; do
+		paths+=("$(mise where "java@$version")")
+	done <"$CONFIG_DIR/java-versions"
+	local IFS=,
+	echo "${paths[*]}"
+}
+
+install_missing_tools() {
+	if [ -n "$(mise ls --global --missing)" ]; then
+		log "installing missing mise tools"
+		# The android-sdk plugin runs yq and java while it installs, so they need shims before it.
+		mise install jq yq java
+		mise reshim
+		mise install
+	fi
+	local version
+	tail -n +2 "$CONFIG_DIR/java-versions" | while read -r version; do
+		mise where "java@$version" >/dev/null 2>&1 || mise install "java@$version"
+	done
+	mise reshim
+}
+
+install_missing_sdk_packages() {
+	local package missing=()
+	while read -r package; do
+		[ -e "$ANDROID_HOME/${package//;//}" ] || missing+=("$package")
+	done <"$CONFIG_DIR/sdk-packages"
+	if [ "${#missing[@]}" -gt 0 ]; then
+		log "installing missing SDK packages: ${missing[*]}"
+		# yes stops with SIGPIPE once sdkmanager exits, so only sdkmanager's status counts.
+		(set +o pipefail; yes | sdkmanager --licenses >/dev/null)
+		sdkmanager "${missing[@]}"
+	fi
+}
+
+# Writes the baked JDK list into gradle.properties and leaves every other property as the builds left it.
+seed_gradle_properties() {
+	local file="$HOME/.gradle/gradle.properties" line
+	line="$INSTALLATIONS_KEY=$(java_installation_paths)"
+	mkdir -p "$HOME/.gradle"
+	if [ ! -f "$file" ]; then
+		echo "$line" >"$file"
+		return
+	fi
+	grep -q -x -F "$line" "$file" && return
+	{
+		grep -v "^$INSTALLATIONS_KEY=" "$file" || true
+		echo "$line"
+	} >"$file.tmp"
+	mv "$file.tmp" "$file"
+}
+
+prepare() {
+	mkdir -p "$HOME/.jenkins-cache"
+	install_missing_tools
+	install_missing_sdk_packages
+	seed_gradle_properties
+}
+
+if [ "${1:-}" = --prepare ]; then
+	prepare
+	exit
+fi
+
+# A base image whose entrypoint starts as root (such as an SSH agent) still prepares the agent user's home.
+if [ "$(id -u)" -eq 0 ]; then
+	agent_user="$(cat "$CONFIG_DIR/agent-user")"
+	runuser -u "$agent_user" -- env HOME="$(getent passwd "$agent_user" | cut -d: -f6)" PATH="$PATH" \
+		ANDROID_HOME="$ANDROID_HOME" "$0" --prepare
+else
+	prepare
+fi
+
+exec "$@"

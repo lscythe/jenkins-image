@@ -1,0 +1,64 @@
+name: Image
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Google's Android tools for Linux are x86_64 only, so the image is built and tested on an amd64 runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify
+        run: test/verify-image.sh "ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+
+      - name: Smoke test
+        run: test/smoke-test.sh container "ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while read -r tag; do
+            docker push "$tag"
+          done <<<"$TAGS"

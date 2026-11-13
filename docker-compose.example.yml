@@ -1,0 +1,27 @@
+# An inbound Android agent. Copy this file, replace the placeholders, then run: docker compose up -d
+services:
+  android-agent:
+    image: ghcr.io/OWNER/REPO:VERSION
+    platform: linux/amd64
+    restart: unless-stopped
+    mem_limit: 16g
+    environment:
+      JENKINS_URL: https://jenkins.example.com
+      JENKINS_AGENT_NAME: android-1
+      JENKINS_SECRET: ${JENKINS_SECRET}
+      JENKINS_WEB_SOCKET: "true"
+      # Optional: a folder of SDK zips the builds unpack into ~/.jenkins-cache. Use the variable name your
+      # pipeline reads; the image passes every variable through unchanged.
+      SDK_ARCHIVE_DIR: /opt/sdk-archives
+    volumes:
+      - gradle:/home/jenkins/.gradle
+      - mise:/home/jenkins/.local/share/mise
+      - cache:/home/jenkins/.jenkins-cache
+      - workspace:/home/jenkins/agent
+      - /path/on/host/sdk-archives:/opt/sdk-archives:ro
+
+volumes:
+  gradle:
+  mise:
+  cache:
+  workspace:
