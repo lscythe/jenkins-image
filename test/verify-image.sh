@@ -136,6 +136,19 @@ check_with_volumes "existing gradle.properties keeps build properties" '
 	! grep -q "=/gone$" ~/.gradle/gradle.properties
 	[ "$(grep -c "^org.gradle.java.installations.paths=" ~/.gradle/gradle.properties)" -eq 1 ]'
 
+check "the image has the cache retention init script" '
+	cmp /etc/android-agent/cache-retention.gradle ~/.gradle/init.d/cache-retention.gradle'
+
+# A Gradle volume without the init script gets it at start; one that has its own copy keeps it.
+docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+	-c 'rm -rf ~/.gradle/init.d'
+check_with_volumes "the cache retention init script is copied into a used volume" '
+	cmp /etc/android-agent/cache-retention.gradle ~/.gradle/init.d/cache-retention.gradle'
+docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+	-c 'echo "// kept" > ~/.gradle/init.d/cache-retention.gradle'
+check_with_volumes "an existing cache retention init script is left alone" '
+	[ "$(cat ~/.gradle/init.d/cache-retention.gradle)" = "// kept" ]'
+
 # A mise volume Docker did not fill from the image (a bind mount, or volume-nocopy) gets every tool on start.
 # This downloads the JDK, Ruby and the SDK packages again.
 unfilled=(--mount "type=volume,src=$suffix-mise-unfilled,dst=$agent_home/.local/share/mise,volume-nocopy")

@@ -64,11 +64,20 @@ seed_gradle_properties() {
 	mv "$file.tmp" "$file"
 }
 
+# A copy already in the Gradle volume wins, so an agent can keep its own retention settings.
+seed_gradle_init_scripts() {
+	local target="$HOME/.gradle/init.d/cache-retention.gradle"
+	[ -e "$target" ] && return
+	mkdir -p "$(dirname "$target")"
+	cp "$CONFIG_DIR/cache-retention.gradle" "$target"
+}
+
 prepare() {
 	mkdir -p "$HOME/.jenkins-cache"
 	install_missing_tools
 	install_missing_sdk_packages
 	seed_gradle_properties
+	seed_gradle_init_scripts
 }
 
 if [ "${1:-}" = --prepare ]; then

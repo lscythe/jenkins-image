@@ -71,8 +71,8 @@ RUN case "${TARGETARCH:-amd64}" in \
 	&& rm "/tmp/${asset}"
 
 COPY --chmod=0755 rootfs/usr/local/bin/android-agent-init /usr/local/bin/android-agent-init
+COPY rootfs/etc/android-agent/cache-retention.gradle /etc/android-agent/cache-retention.gradle
 RUN ln -s "${BASE_ENTRYPOINT}" /usr/local/bin/base-entrypoint \
-	&& mkdir -p /etc/android-agent \
 	&& echo "${AGENT_USER}" > /etc/android-agent/agent-user \
 	&& printf '%s\n' "${JAVA_VERSION}" ${EXTRA_JAVA_VERSIONS} > /etc/android-agent/java-versions \
 	&& printf '%s\n' \

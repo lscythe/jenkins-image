@@ -173,6 +173,37 @@ generate_app() {
 		time ./gradlew --quiet assembleDebug
 		./gradlew --quiet --stop
 	EOF
+
+	# Runs in the container only: throwaway builds with the image's cache retention init script in place.
+	cat >"$dir/cache-retention.sh" <<-'EOF'
+		set -euo pipefail
+		gradle8="$(mktemp -d)" gradle7="$(mktemp -d)"
+		# The init script sets these before settings.gradle runs; Gradle's own defaults are 30 and 7 days.
+		# Gradle's public API can only set retention, so this reads it back through internal accessors (renamed in
+		# later 8.x releases) and turns the cut-off timestamp into days.
+		cat >"$gradle8/settings.gradle" <<-'SETTINGS'
+			def retentionDays = { resource ->
+			    def cutOff = resource.metaClass.respondsTo(resource, 'getEntryRetentionTimestampSupplier')
+			        ? resource.entryRetentionTimestampSupplier.get()
+			        : resource.removeUnusedEntriesOlderThanAsSupplier.get()
+			    Math.round((System.currentTimeMillis() - cutOff) / 86400000d)
+			}
+			def expected = [releasedWrappers: 7, snapshotWrappers: 3, downloadedResources: 14, createdResources: 5]
+			if (GradleVersion.current().baseVersion >= GradleVersion.version('8.8')) expected.buildCache = 3
+			expected.each { name, days ->
+			    def actual = retentionDays(settings.caches."$name")
+			    if (actual != days) throw new GradleException("$name keeps entries $actual days, expected $days")
+			}
+		SETTINGS
+		touch "$gradle7/settings.gradle"
+		# 8.0 is the first version with cache settings, and 8.8 the first with the build cache's.
+		for version in 8.0.2 8.7 8.14.7; do
+			(cd "$gradle8" && mise exec "gradle@$version" -- gradle --quiet --no-daemon help)
+			echo "Gradle $version builds with the cache retention init script"
+		done
+		(cd "$gradle7" && mise exec gradle@7.6.4 -- gradle --quiet --no-daemon help)
+		echo "Gradle 7.6.4 builds with the cache retention init script"
+	EOF
 }
 
 run_in_container() {
@@ -183,7 +214,7 @@ run_in_container() {
 		-v "${volumes[0]}:/home/jenkins/.gradle" \
 		-v "${volumes[1]}:/home/jenkins/.local/share/mise" \
 		"$image" \
-		bash -c 'mkdir -p ~/agent/smoke && cd ~/agent/smoke && tar -x && uname -m && bash run.sh'
+		bash -c 'mkdir -p ~/agent/smoke && cd ~/agent/smoke && tar -x && uname -m && bash run.sh && bash cache-retention.sh'
 }
 
 run_natively() {

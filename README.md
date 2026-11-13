@@ -104,6 +104,27 @@ libssl-dev, libyaml-dev, zlib1g-dev, libffi-dev). They come from the base image'
 the image installed, so a project using a Gradle Java toolchain finds a baked JDK instead of downloading one.
 Builds may add and remove their own properties there.
 
+### Gradle cache retention
+
+`~/.gradle/init.d/cache-retention.gradle` shortens how long Gradle keeps unused cache entries, so an agent's
+Gradle home shrinks back on its own after building many different projects or Gradle versions:
+
+| Cache | Unused entries removed after | Gradle's default |
+| --- | --- | --- |
+| Released Gradle distributions (`wrapper/dists`) | 7 days | 30 days |
+| Snapshot Gradle distributions | 3 days | 7 days |
+| Downloaded dependencies and resources | 14 days | 30 days |
+| Resources Gradle creates, such as transformed artifacts | 5 days | 7 days |
+| Local build cache | 3 days | 7 days |
+
+Gradle applies every script in `init.d` to every build. Gradle 8.0 added these settings and Gradle 8.8 the build
+cache's, so the script checks the version: Gradle 8.0 to 8.7 get every row but the build cache, and Gradle 7 and
+older keep their defaults instead of failing. Gradle cleans its caches at most once a day, when its daemon stops.
+
+The script lives in the image at `/etc/android-agent/cache-retention.gradle`. The entrypoint copies it into
+`~/.gradle/init.d/` when it is missing, so a mounted Gradle volume gets it too. A copy already in the volume is
+left alone: edit or delete it there to change an agent's retention.
+
 ## Build arguments
 
 | Argument | Default | Purpose |
@@ -166,7 +187,8 @@ Before running the agent, the entrypoint (`android-agent-init`):
    or with a volume Docker did not fill (a bind mount, or `volume-nocopy`). Those downloads happen once per volume.
 2. writes `org.gradle.java.installations.paths` into `~/.gradle/gradle.properties`, creating the file if needed and
    leaving every other property as it is.
-3. creates `~/.jenkins-cache`.
+3. copies the [cache retention init script](#gradle-cache-retention) into `~/.gradle/init.d/` if it is missing.
+4. creates `~/.jenkins-cache`.
 
 A bind-mounted directory must be writable by the agent user (uid 1000).
 
@@ -244,7 +266,8 @@ path contract above.
 
 ```bash
 test/verify-image.sh android-agent              # tools, SDK packages, path contract, volumes, SDK archive mount
-test/smoke-test.sh container android-agent      # builds and tests a small app with the NDK, and times it
+test/smoke-test.sh container android-agent      # builds and tests a small app with the NDK, times it, and runs
+                                                # throwaway Gradle 7 and 8 builds with the cache retention script
 test/smoke-test.sh native                       # the same build on this machine, for comparison
 ```
 

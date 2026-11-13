@@ -1,0 +1,17 @@
+// Every build on the agent runs this script, so older Gradle versions skip what they lack instead of failing:
+// cache retention settings arrived in Gradle 8.0, and the build cache's in 8.8.
+def gradleVersion = GradleVersion.current().baseVersion
+
+if (gradleVersion >= GradleVersion.version('8.0')) {
+    beforeSettings { settings ->
+        settings.caches {
+            releasedWrappers.removeUnusedEntriesAfterDays = 7
+            snapshotWrappers.removeUnusedEntriesAfterDays = 3
+            downloadedResources.removeUnusedEntriesAfterDays = 14
+            createdResources.removeUnusedEntriesAfterDays = 5
+            if (gradleVersion >= GradleVersion.version('8.8')) {
+                buildCache.removeUnusedEntriesAfterDays = 3
+            }
+        }
+    }
+}
