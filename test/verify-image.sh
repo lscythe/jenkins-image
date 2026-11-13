@@ -105,6 +105,8 @@ check_with_volumes() {
 # A read-only host folder of SDK zips, named by an env var, unpacks once into the cache volume.
 mkdir -p "$archives/sdk-1.0" && echo "sdk" >"$archives/sdk-1.0/VERSION"
 (cd "$archives" && zip -q -r sdk-1.0.zip sdk-1.0 && rm -r sdk-1.0)
+# mktemp makes the folder private to the host user; the agent user (uid 1000) only needs to read it.
+chmod a+rx "$archives" && chmod a+r "$archives/sdk-1.0.zip"
 check "a read-only SDK archive folder unzips into the cache volume" '
 	! touch "$SDK_ARCHIVE_DIR/write-test" 2>/dev/null
 	unzip -q "$SDK_ARCHIVE_DIR/sdk-1.0.zip" -d ~/.jenkins-cache/sdk

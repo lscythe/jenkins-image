@@ -184,7 +184,8 @@ docker run ... \
 ```
 
 The image holds no archives and no host paths. Builds unzip what they need into `~/.jenkins-cache` (`unzip` is
-installed). On OrbStack, any folder under your macOS home can be mounted this way.
+installed). On a Linux host, the folder and its zips must be readable by the agent user (uid 1000). On OrbStack,
+any folder under your macOS home can be mounted this way.
 
 ## Running it as a Jenkins agent
 
