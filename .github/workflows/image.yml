@@ -10,31 +10,52 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
 jobs:
   build:
-    # Google's Android tools for Linux are x86_64 only, so the image is built and tested on an amd64 runner.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    name: Build ${{ matrix.arch }}
+    # Each architecture builds and runs its tests on a native runner.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # aapt2, the NDK, CMake and platform-tools are x86_64 only; on the arm64 runner QEMU runs them in the tests.
+      - if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: amd64
+
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-${{ matrix.arch }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=sha,format=long
 
       - name: Build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -42,10 +63,10 @@ jobs:
             github_token=${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify
-        run: test/verify-image.sh "ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+        run: test/verify-image.sh "${IMAGE,,}:sha-${GITHUB_SHA}-${{ matrix.arch }}"
 
       - name: Smoke test
-        run: test/smoke-test.sh container "ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+        run: test/smoke-test.sh container "${IMAGE,,}:sha-${GITHUB_SHA}-${{ matrix.arch }}"
 
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -62,3 +83,43 @@ jobs:
           while read -r tag; do
             docker push "$tag"
           done <<<"$TAGS"
+
+  publish:
+    name: Publish multi-arch tags
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Each tag becomes a list of both architectures' images, so a host pulls the one matching it.
+      - name: Create multi-arch tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          image="${IMAGE,,}"
+          args=()
+          while read -r tag; do
+            args+=(--tag "$tag")
+          done <<<"$TAGS"
+          docker buildx imagetools create "${args[@]}" \
+            "$image:sha-${GITHUB_SHA}-amd64" "$image:sha-${GITHUB_SHA}-arm64"
+          docker buildx imagetools inspect "$image:sha-${GITHUB_SHA}"

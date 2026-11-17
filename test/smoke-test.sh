@@ -209,7 +209,9 @@ generate_app() {
 run_in_container() {
 	local image="$1" dir="$2"
 	volumes=("smoke-$$-gradle" "smoke-$$-mise")
-	tar -C "$dir" -c . | docker run --rm -i --platform linux/amd64 \
+	local platform
+	platform="$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")"
+	tar -C "$dir" -c . | docker run --rm -i --platform "$platform" \
 		--entrypoint /usr/local/bin/android-agent-init \
 		-v "${volumes[0]}:/home/jenkins/.gradle" \
 		-v "${volumes[1]}:/home/jenkins/.local/share/mise" \

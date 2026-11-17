@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.10
 
-# A Jenkins agent for Android builds. Build it for linux/amd64: Google ships aapt2, the NDK and CMake for
-# x86_64 Linux only. See README.md for the build arguments and the paths builds can rely on.
+# A Jenkins agent for Android builds, for linux/amd64 and linux/arm64. See README.md for the build arguments, the
+# paths builds can rely on, and what an arm64 host needs to run the x86_64-only Android tools.
 
 ARG BASE_IMAGE=jenkins/inbound-agent:3384.v60d89463d9e0-1-jdk17@sha256:b0c41a6b69468ac7c72ad25c2a364e6b5f116a1ea44510642bd629a6323f0fab
 
@@ -57,11 +57,20 @@ RUN apt-get update \
 	&& locale-gen \
 	&& rm -rf /var/lib/apt/lists/*
 
-ARG TARGETARCH
-RUN case "${TARGETARCH:-amd64}" in \
+# Google publishes aapt2, the NDK, CMake and platform-tools for x86_64 Linux only. On arm64 the image carries the
+# x86_64 C runtime they link against, and the host runs them through Rosetta or QEMU.
+RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+		dpkg --add-architecture amd64 \
+		&& apt-get update \
+		&& apt-get install -y --no-install-recommends libc6:amd64 libgcc-s1:amd64 libstdc++6:amd64 zlib1g:amd64 \
+		&& rm -rf /var/lib/apt/lists/*; \
+	fi
+
+# The architecture comes from the system, not TARGETARCH, which builders without BuildKit leave empty.
+RUN case "$(dpkg --print-architecture)" in \
 		amd64) mise_arch=x64 ;; \
 		arm64) mise_arch=arm64 ;; \
-		*) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+		*) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
 	esac \
 	&& asset="mise-v${MISE_VERSION}-linux-${mise_arch}" \
 	&& base="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}" \

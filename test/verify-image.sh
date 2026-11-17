@@ -9,6 +9,14 @@ image="${1:?usage: test/verify-image.sh IMAGE}"
 agent_home=/home/jenkins
 failures=0
 
+# The image's own platform, so an arm64 image is checked as arm64 and an amd64 one as amd64.
+platform="$(docker image inspect -f '{{.Os}}/{{.Architecture}}' "$image")"
+case "$platform" in
+	linux/amd64) machine=x86_64 java_arch=amd64 ;;
+	linux/arm64) machine=aarch64 java_arch=aarch64 ;;
+	*) echo "unsupported image platform: $platform" >&2; exit 2 ;;
+esac
+
 report() {
 	local name="$1" output="$2" status="$3"
 	if [ "$status" -eq 0 ]; then
@@ -24,12 +32,26 @@ report() {
 check() {
 	local name="$1" script="$2" output status=0
 	shift 2
-	output="$(docker run --rm --platform linux/amd64 --entrypoint /usr/local/bin/android-agent-init "$@" "$image" \
+	output="$(docker run --rm --platform "$platform" --entrypoint /usr/local/bin/android-agent-init "$@" "$image" \
 		bash -c "set -e; $script" 2>&1)" || status=$?
 	report "$name" "$output" "$status"
 }
 
-check "runs as x86_64" '[ "$(uname -m)" = x86_64 ]'
+check "runs as $machine" '[ "$(uname -m)" = "$EXPECTED_MACHINE" ]' -e "EXPECTED_MACHINE=$machine"
+
+check "the build and agent JDKs run natively" '
+	for java in java "$JENKINS_JAVA_BIN"; do
+		"$java" -XshowSettings:properties -version 2>&1 | grep -q "os.arch = $EXPECTED_JAVA_ARCH$" \
+			|| { echo "$java is not $EXPECTED_JAVA_ARCH"; exit 1; }
+	done' -e "EXPECTED_JAVA_ARCH=$java_arch"
+
+# Google publishes these for x86_64 Linux only; on arm64 the host runs them through Rosetta or QEMU.
+check "x86_64 SDK tools run" '
+	"$ANDROID_HOME"/build-tools/*/aapt2 version
+	"$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version
+	"$ANDROID_HOME"/cmake/*/bin/cmake --version
+	"$ANDROID_HOME"/cmake/*/bin/ninja --version
+	adb version'
 
 check "java is the configured global JDK" '
 	expected="$(head -n 1 /etc/android-agent/java-versions)"
@@ -84,7 +106,8 @@ check "run-time env vars reach the command unchanged" '
 # Empty named volumes on every documented mount point.
 suffix="verify-$$"
 volumes=(gradle mise cache workspace)
-archives="$(mktemp -d)"
+# Docker hosts that run in a VM (Colima, Docker Desktop) share the home folder with it, not the system temp folder.
+archives="$(mktemp -d "$HOME/.verify-image-archives.XXXXXX")"
 cleanup() {
 	rm -rf "$archives"
 	for volume in "${volumes[@]}"; do docker volume rm -f "$suffix-$volume" >/dev/null; done
@@ -123,13 +146,13 @@ check_with_volumes "empty named volumes are writable and tools still run" '
 	java -version && sdkmanager --list_installed >/dev/null'
 
 # A volume that already holds Gradle state but no gradle.properties gets one seeded.
-docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+docker run --rm --platform "$platform" --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
 	-c 'rm -f ~/.gradle/gradle.properties'
 check_with_volumes "gradle.properties is seeded into a used volume" '
 	grep -q "^org.gradle.java.installations.paths=" ~/.gradle/gradle.properties'
 
 # A build's own properties survive, and a stale JDK list is replaced.
-docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+docker run --rm --platform "$platform" --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
 	-c 'printf "%s\n" "org.gradle.java.installations.paths=/gone" "build.owned=1" > ~/.gradle/gradle.properties'
 check_with_volumes "existing gradle.properties keeps build properties" '
 	grep -q "^build.owned=1$" ~/.gradle/gradle.properties
@@ -140,11 +163,11 @@ check "the image has the cache retention init script" '
 	cmp /etc/android-agent/cache-retention.gradle ~/.gradle/init.d/cache-retention.gradle'
 
 # A Gradle volume without the init script gets it at start; one that has its own copy keeps it.
-docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+docker run --rm --platform "$platform" --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
 	-c 'rm -rf ~/.gradle/init.d'
 check_with_volumes "the cache retention init script is copied into a used volume" '
 	cmp /etc/android-agent/cache-retention.gradle ~/.gradle/init.d/cache-retention.gradle'
-docker run --rm --platform linux/amd64 --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
+docker run --rm --platform "$platform" --entrypoint bash -v "$suffix-gradle:$agent_home/.gradle" "$image" \
 	-c 'echo "// kept" > ~/.gradle/init.d/cache-retention.gradle'
 check_with_volumes "an existing cache retention init script is left alone" '
 	[ "$(cat ~/.gradle/init.d/cache-retention.gradle)" = "// kept" ]'
@@ -154,7 +177,7 @@ check_with_volumes "an existing cache retention init script is left alone" '
 unfilled=(--mount "type=volume,src=$suffix-mise-unfilled,dst=$agent_home/.local/share/mise,volume-nocopy")
 volumes+=(mise-unfilled)
 docker volume create "$suffix-mise-unfilled" >/dev/null
-docker run --rm --platform linux/amd64 --user root --entrypoint chown "${unfilled[@]}" "$image" \
+docker run --rm --platform "$platform" --user root --entrypoint chown "${unfilled[@]}" "$image" \
 	1000:1000 "$agent_home/.local/share/mise"
 check "an unfilled mise volume gets every tool on start" '
 	[ -z "$(mise ls --global --missing)" ]

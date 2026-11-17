@@ -6,35 +6,44 @@ credentials, no internal hosts, no commercial tools. Builds bring secrets and li
 
 ## Where it runs
 
-The image is built for `linux/amd64` only, because Google ships the Android Linux tools (aapt2, the NDK, CMake)
-for x86_64 only.
+The image is published for `linux/amd64` and `linux/arm64` under the same tags, and Docker pulls the one that
+matches the host.
 
-- **Apple Silicon Macs with [OrbStack](https://orbstack.dev):** turn on **Settings > System > Use Rosetta to run
-  Intel code**. Without Rosetta, OrbStack runs amd64 containers under QEMU, which is far too slow for Android
-  builds. Check the setting with:
+Google publishes some Android tools for x86_64 Linux only: aapt2 (which Gradle downloads from Maven), the NDK's
+clang, CMake and ninja, and platform-tools. The arm64 image runs everything else natively (the JVM, Gradle,
+Kotlin, D8 and R8) and carries the x86_64 C runtime those few tools need. The host must run x86_64 binaries for
+it, through Rosetta or QEMU:
 
-  ```bash
-  orb config show | grep rosetta        # expect: rosetta: true
-  orb config set rosetta true           # turn it on, then restart OrbStack
-  ```
+- **Apple Silicon Macs** run the arm64 image. The Linux VM needs Rosetta for the x86_64 tools:
+  - [Colima](https://github.com/abiosoft/colima): `colima start --vm-type vz --vz-rosetta`. Check it with
+    `grep -E '^(vmType|rosetta):' ~/.colima/default/colima.yaml` (expect `vz` and `true`).
+  - [OrbStack](https://orbstack.dev): **Settings > System > Use Rosetta to run Intel code** (`orb config show |
+    grep rosetta`, expect `rosetta: true`).
+  - Docker Desktop: **Settings > General > Use Rosetta for x86_64/amd64 emulation on Apple Silicon**.
+- **arm64 Linux hosts** (such as cloud ARM machines) run the arm64 image and need QEMU registered for x86_64
+  binaries, for example `docker run --privileged --rm tonistiigi/binfmt --install amd64`. QEMU is slower than
+  Rosetta, but only those few tools run under it.
+- **x86_64 Linux hosts** run the amd64 image natively and need nothing else.
 
-  Then confirm a container runs as x86_64:
+To check the x86_64 tools work in the arm64 image on a host:
 
-  ```bash
-  docker run --rm --platform linux/amd64 --entrypoint uname IMAGE -m   # x86_64
-  ```
+```bash
+docker run --rm --entrypoint bash IMAGE -c 'uname -m; "$ANDROID_HOME"/build-tools/*/aapt2 version'
+# aarch64, then the aapt2 version. "rosetta error" or "exec format error" means the host cannot run x86_64.
+```
 
-- **Native x86_64 Linux hosts:** nothing else is needed. The image assumes nothing about OrbStack.
+To run the amd64 image on an Apple Silicon Mac anyway, pass `--platform linux/amd64`. Every tool then runs under
+Rosetta, which makes builds about 4 times slower (see [Speed](#speed)).
 
 ### Resources
 
-Large apps need a lot from the Linux VM (OrbStack) or the host:
+Large apps need a lot from the Linux VM on a Mac, or from the host:
 
-| Resource | Recommendation | OrbStack |
-| --- | --- | --- |
-| Memory | 16 GB or more for large apps | Settings > System > Memory limit, or `orb config set memory_mib 16384` |
-| CPU | Every core the Mac can spare | Settings > System > CPU limit, or `orb config set cpu 8` |
-| Disk | 100 GB or more free for large apps | OrbStack's disk grows on demand; keep that much free on the Mac |
+| Resource | Recommendation | Colima | OrbStack |
+| --- | --- | --- | --- |
+| Memory | 16 GB or more for large apps | `colima start --memory 16` | `orb config set memory_mib 16384` |
+| CPU | Every core the Mac can spare | `colima start --cpu 8` | `orb config set cpu 8` |
+| Disk | 100 GB or more free for large apps | `colima start --disk 150` (it only grows) | grows on demand |
 
 Gradle sizes its daemon heap from the project's `org.gradle.jvmargs`, not from the container, so keep the
 container's memory above what the daemon, Kotlin daemon and test workers need together.
@@ -42,20 +51,21 @@ container's memory above what the daemon, Kotlin daemon and test workers need to
 ### Speed
 
 A clean `assembleDebug` of the minimal smoke-test app (`test/smoke-test.sh`), with the Gradle daemon stopped and
-the caches warm, on one Apple Silicon Mac Studio (14 cores, 36 GB; OrbStack VM with 20 GB and Rosetta on):
+the caches warm, on a Mac Studio (Apple M4 Max) with Colima (`vz` VM with Rosetta, 12 CPUs, 28 GB):
 
 | Where | Time |
 | --- | --- |
 | Natively on the Mac | 4.6 s |
-| In the container, OrbStack with Rosetta | 18.6 s |
+| arm64 image (x86_64 tools under Rosetta) | 5.8 s |
+| amd64 image (everything under Rosetta) | 20.9 s |
 
-Each number is a single run. Most of a build this small is JVM and Gradle start-up, which Rosetta slows the most,
-so the ratio for a large app can differ in either direction. Compare a real build the same way before moving work
+Each number is a single run. The app is tiny, so JVM and Gradle start-up dominate; a large app spends more of its
+time in the compilers, which run natively in the arm64 image. Compare a real build the same way before moving work
 to the container.
 
-Under Rosetta, Gradle's file-system watcher logs `Couldn't poll for events, error = 4` and turns itself off for
-that build. The build is not affected. To silence it, run Gradle with `--no-watch-fs` or set
-`org.gradle.vfs.watch=false` in the project.
+In the amd64 image under Rosetta, Gradle's file-system watcher logs `Couldn't poll for events, error = 4` and
+turns itself off for that build. The build is not affected. The arm64 image does not log it. To silence it, run
+Gradle with `--no-watch-fs` or set `org.gradle.vfs.watch=false` in the project.
 
 ## Path contract
 
@@ -147,20 +157,22 @@ left alone: edit or delete it there to change an agent's retention.
 | `ANDROID_NDK` | `26.1.10909125` | |
 | `ANDROID_CMAKE` | `3.22.1` | |
 
-Build it:
+Build it with BuildKit (`docker buildx build`, or `docker build` where buildx is the default). Without
+`--platform` it builds for the machine's own architecture:
 
 ```bash
-docker build --platform linux/amd64 -t android-agent .
+docker buildx build --load -t android-agent .
 
-# A project that also builds with JDK 21:
-docker build --platform linux/amd64 --build-arg EXTRA_JAVA_VERSIONS="temurin-21" -t android-agent .
+# Another architecture, or a project that also builds with JDK 21:
+docker buildx build --load --platform linux/amd64 -t android-agent .
+docker buildx build --load --build-arg EXTRA_JAVA_VERSIONS="temurin-21" -t android-agent .
 ```
 
 mise asks GitHub's API for some versions. To avoid its rate limit, pass a token as a BuildKit secret; it is not
 stored in the image:
 
 ```bash
-GITHUB_TOKEN=... docker build --platform linux/amd64 --secret id=github_token,env=GITHUB_TOKEN -t android-agent .
+GITHUB_TOKEN=... docker buildx build --load --secret id=github_token,env=GITHUB_TOKEN -t android-agent .
 ```
 
 ## Volumes
@@ -177,9 +189,9 @@ The image works with these mounted, empty or not:
 Keep `~/.jenkins-cache` a volume: builds unpack each SDK version into it once and reuse it after that.
 
 Use **named Docker volumes**. Docker fills an empty named volume from the image the first time it is mounted, so
-the baked tools and SDK appear in it with the agent user as owner. On OrbStack, named volumes also live inside the
-Linux VM, which is much faster than bind-mounting macOS folders for directories with many small files like the
-Gradle and mise caches.
+the baked tools and SDK appear in it with the agent user as owner. On a Mac (Colima, OrbStack, Docker Desktop),
+named volumes also live inside the Linux VM, which is much faster than bind-mounting macOS folders for directories
+with many small files like the Gradle and mise caches.
 
 Before running the agent, the entrypoint (`android-agent-init`):
 
@@ -206,8 +218,8 @@ docker run ... \
 ```
 
 The image holds no archives and no host paths. Builds unzip what they need into `~/.jenkins-cache` (`unzip` is
-installed). On a Linux host, the folder and its zips must be readable by the agent user (uid 1000). On OrbStack,
-any folder under your macOS home can be mounted this way.
+installed). On a Linux host, the folder and its zips must be readable by the agent user (uid 1000). On a Mac, put
+the folder under your home folder: Colima, OrbStack and Docker Desktop share it with their Linux VM by default.
 
 ## Running it as a Jenkins agent
 
@@ -225,7 +237,6 @@ any folder under your macOS home can be mounted this way.
    docker volume create android-agent-workspace
 
    docker run -d --name android-agent --restart unless-stopped \
-     --platform linux/amd64 \
      --memory 16g \
      -v android-agent-gradle:/home/jenkins/.gradle \
      -v android-agent-mise:/home/jenkins/.local/share/mise \
@@ -252,7 +263,7 @@ the volumes, the SDK archive mount and its variable in the template's mounts and
 Build on an SSH agent base instead:
 
 ```bash
-docker build --platform linux/amd64 \
+docker buildx build --load \
   --build-arg BASE_IMAGE=jenkins/ssh-agent:TAG-jdk17 \
   --build-arg BASE_ENTRYPOINT=/usr/local/bin/setup-sshd \
   -t android-ssh-agent .
@@ -271,8 +282,12 @@ test/smoke-test.sh container android-agent      # builds and tests a small app w
 test/smoke-test.sh native                       # the same build on this machine, for comparison
 ```
 
+Both container scripts test the image as its own architecture, so an arm64 image also checks that the host runs
+its x86_64 tools.
+
 ## Publishing
 
-`.github/workflows/image.yml` builds the image for `linux/amd64` on every pull request and push, runs both test
-scripts, and pushes it to `ghcr.io/OWNER/REPO` when a `v*` tag is pushed, tagged with the version (`1.2.3` and
-`1.2`) and the commit (`sha-...`).
+`.github/workflows/image.yml` builds and tests the image for each architecture on a native GitHub runner, on every
+pull request and push. The arm64 runner gets QEMU for the x86_64 tools. When a `v*` tag is pushed, it pushes
+`VERSION-amd64` and `VERSION-arm64`, then publishes the multi-arch tags `ghcr.io/OWNER/REPO:1.2.3`, `:1.2`,
+`:latest` and `:sha-...` that point to both.

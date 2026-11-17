@@ -2,7 +2,6 @@
 services:
   android-agent:
     image: ghcr.io/OWNER/REPO:VERSION
-    platform: linux/amd64
     restart: unless-stopped
     mem_limit: 16g
     environment:
